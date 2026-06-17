@@ -1,0 +1,280 @@
+---
+title: "Rrm4 iCLIP2 crosslink events across stop codon in mitochondrial transcripts"
+date: last-modified
+author: 
+    - name:  "Srimeenakshi Sankaranarayanan"
+      
+title-block-banner: true
+format: 
+    html:
+        theme: flatly
+        self-contained: true
+        code-fold: true
+        code-summary: "Show the code"
+        toc: true
+        number-sections: true
+        anchor-sections: true
+    pdf:
+        toc: true
+        number-sections: true
+        self-contained: true
+editor: source
+execute:
+  echo: true
+  error: false
+  warning: false
+  message: false
+---
+
+In this analysis, I will compare the Rrm4 crosslink signals from iCLIP and iCLIP2 methods across stop codon of mitochondrial transcripts associated with complex I, III and V. Genes encoding proteins involved in mitochondrial complex I and III were obtained from Nina. Whereas, genes encoding ATPase synthase FO F1 complex were obtained from Olgeiser et.al (2019).
+
+```{r}
+# Libraries
+library(BSgenome.Umaydis.ENSMBL.UM1) # forged tomato genome
+library(ggplot2)
+library(BindingSiteFinder)
+library(rtracklayer)
+library(ComplexHeatmap)
+library(circlize)
+library(GenomicFeatures)
+library(forcats)
+library(tidyr)
+library(dplyr)
+library(tidyverse)
+library(GenomicRanges)
+library(magick)
+library(magrittr)
+library(gridExtra)
+library(IRanges)
+library(Biostrings)
+library(ggrepel)
+library(ggpubr)
+library(viridis)
+library(reshape2)
+library(gprofiler2)
+library(ggsci)
+library(GetoptLong)
+library(tidyHeatmap)
+```
+
+```{r}
+## set the theme for ggplots
+my_theme = theme_set(theme_bw() +
+          theme(axis.text = element_text(size = 10, colour="black"),
+                axis.title = element_text(size=12, colour="black"),
+                axis.ticks=element_line(color="black"),
+                axis.ticks.length=unit(.15, "cm"),
+                panel.border=element_rect(color="black", fill = NA),
+                panel.background = element_blank(),
+                plot.background = element_blank(),
+                legend.text = element_text(size=10),
+                legend.position = "bottom",
+                aspect.ratio = 1/1)
+)
+```
+
+```{r}
+## min-max normalization function
+min_max_noramlize <- function(x){
+  x_new <- (x-min(x)) / (max(x)-min(x)) 
+  return(x_new)
+}
+```
+
+
+```{r}
+## load gene annotation
+gnsN = readRDS("~/Documents/Bioinfo_analysis/iCLIP_course/diffRNA_binding/Annotation_preparation/gns.rds")
+
+trl = readRDS("~/Documents/Bioinfo_analysis/iCLIP_course/diffRNA_binding/Annotation_preparation/trl.rds")
+```
+
+```{r}
+## Load mitochondrial genes
+complex_I <- read.csv("~/Documents/Bioinfo_analysis/iCLIP_course/iCLIP2_Methods_Stoffel_etal_2023/complex_1.csv")
+
+complex_III <- read.csv("~/Documents/Bioinfo_analysis/iCLIP_course/iCLIP2_Methods_Stoffel_etal_2023/complex_3.csv")
+
+ATPase_F0_F1 <- read.csv("~/Documents/Bioinfo_analysis/iCLIP_course/iCLIP2_Methods_Stoffel_etal_2023/Mito_gene.csv") %>% 
+  dplyr::filter(!Complex == "I") %>%
+  dplyr::rename(gene_id = "gene_ID")
+```
+
+
+
+
+```{r}
+#| warning: false
+#| message: false
+
+## import bw files from iCLIP2
+my.path.iclip2 = "~/Documents/Bioinfo_analysis/iCLIP_course/datasets/imb_koenig_2021_11_stoffel_iCLIP_ustilago_Rrm4/merged/bw"
+
+# in plus strand
+plus_bw_i2 = list.files(my.path.iclip2, pattern="Rrm4G.v3.duprm.plus.bw", full.names = T)
+plus_bw_i2 = import(plus_bw_i2, as = "Rle")
+
+
+# in minus strand
+minus_bw_i2 = list.files(my.path.iclip2, pattern="Rrm4G.v3.duprm.minus.bw", full.names = T)
+minus_bw_i2 = import(minus_bw_i2, as="Rle")
+
+
+# make a list
+cl_Rle = list(iC2_p = plus_bw_i2,
+              iC2_m = minus_bw_i2) 
+
+```
+
+
+```{r}
+#| warning: false
+#| message: false
+
+## get the stop codon region for the mito genes
+# make a list with mito genes
+mito_genes <- list(
+  complex_I = complex_I,
+  complex_III = complex_III, 
+  ATPase_complex = ATPase_F0_F1)
+
+mito_genes_stop_codon <- lapply(mito_genes, function(x){
+  # subset the gns for the mito gens
+  gnsM <-  gnsN[gnsN$gene_id %in% x$gene_id] %>% 
+    sort()
+  
+  # get the stop codon
+  stop <- flank(gnsM, -303,start = FALSE) %>% 
+    flank(.,-3)  %>%
+    sort()
+  #get the last nucleotide of stop codon
+  stops = flank(stop,-1, start=FALSE)  %>% 
+   sort(.)
+
+  # stop window
+  stops = stops+10  %>% 
+   sort(.)
+  
+  # separate stop window into + and - strand
+ stop_ls <- list(stops_pl = stops[strand(stops) == "+"]  %>% 
+        sort(.),
+ stops_min = stops[strand(stops) == "-"]  %>% 
+   sort(.)
+ )
+  
+  return(stop_ls) # stop_ls #stops
+})
+
+# sanity check
+#getSeq(Umaydis,mito_genes_stop_codon$complex_I )
+```
+
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+
+heatmap_files <- lapply(names(mito_genes_stop_codon), function(mito_gene_name){
+  
+  mito_gene <- mito_genes_stop_codon[[mito_gene_name]]
+  
+  ## get the crosslinks within the stop window
+   cl_Win =  c(map(cl_Rle[1],~.x[mito_gene$stops_pl] %>% 
+                     as.matrix()),
+            map(cl_Rle[2], ~.x[mito_gene$stops_min] %>% 
+                  as.matrix() %>%
+                  .[, rev(seq_len(ncol(.))), drop = FALSE])
+   )
+   # add rownames
+   rownames(cl_Win$iC2_p) <- mito_gene$stops_pl$geneID
+   rownames(cl_Win$iC2_m) <- mito_gene$stops_min$geneID
+   
+   # combine the plus and minus data
+   cl_win = cl_Win %>%
+     do.call(rbind,.) %>%
+     .[mito_genes[[mito_gene_name]]$gene_id, , drop = FALSE]
+   
+   # normalize
+   cl_win_norm = apply(cl_win,1,min_max_noramlize) %>%
+     t(.) 
+   
+   # included colnames
+   colnames(cl_win_norm) <- c(-10: 10)
+   
+   # get only the position -5 to 10
+   cl_win_norm_mod <- cl_win_norm[,-c(1:5)]
+   
+   # colfun
+   colfun = colorRamp2(c(0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9, 1),
+                    c("#FFFFFF",
+                      "#E6F7F7",
+                      "#CCEEEE",
+                      "#B3E6E6",
+                      "#99DDDD",
+                      "#80D5D5",
+                      "#66CCCC",
+                      "#4DC4C4", 
+                      "#33BBBB", 
+                      "#1AB3B3",
+                      "#00AAAA"))
+   
+   # make hearmap
+   hm = Heatmap(cl_win_norm_mod, 
+                cluster_columns = F, 
+                cluster_rows = F, 
+                column_names_side = "bottom", 
+                col=colfun,
+                row_names_gp = gpar(fontsize=8))
+   
+   save_pdf(hm,  
+            paste0("heatmap_iclip2_", mito_gene_name,".pdf"),  
+            width = 15,  
+            height = 10, 
+            units = "cm")
+   
+  # save PNG for HTML report
+  png_file <- file.path(
+    paste0("heatmap_iclip2_", mito_gene_name, ".png")
+  )
+  
+  png(
+    filename = png_file,
+    width = 15,
+    height = 10,
+    units = "cm",
+    res = 300
+  )
+  
+  ComplexHeatmap::draw(hm)
+  dev.off()
+  
+  png_file
+  })
+
+
+names(heatmap_files) <- names(mito_genes_stop_codon)
+
+```
+
+::: panel-tabset
+
+```{r}
+#| results: asis
+#| warning: false
+#| message: false
+#| echo: false
+
+invisible(lapply(names(heatmap_files), function(mito_gene_name){
+  
+  cat("\n\n## ", mito_gene_name, "\n\n", sep = "")
+  cat("![](", heatmap_files[[mito_gene_name]], "){width=100%}\n\n", sep = "")
+  
+}))
+```
+
+:::
+
+```{r}
+sessionInfo()
+```

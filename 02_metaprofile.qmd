@@ -1,0 +1,232 @@
+---
+title: "Meta profile analysis of Rrm4 crosslink signal across stop codon"
+date: last-modified
+author: 
+    - name:  "Srimeenakshi Sankaranarayanan"
+      
+title-block-banner: true
+format: 
+    html:
+        theme: flatly
+        self-contained: true
+        code-fold: true
+        code-summary: "Show the code"
+        toc: true
+        number-sections: true
+        anchor-sections: true
+    pdf:
+        toc: true
+        number-sections: true
+        self-contained: true
+editor: source
+execute:
+  echo: true
+  error: false
+  warning: false
+  message: false
+---
+Previosly, Rrm4 was shown to bind specifically at the stop codon, suggesting a link between RNA transport and translation. Here, I will assess whether the improved iCLIP2 protocol detects stop-codon binding with higher efficiency than the previous iCLIP protocol used in Olgeiser et.al (2019). 
+
+```{r}
+# Libraries
+library(BSgenome.Umaydis.ENSMBL.UM1) # forged tomato genome
+library(ggplot2)
+library(BindingSiteFinder)
+library(rtracklayer)
+library(ComplexHeatmap)
+library(GenomicFeatures)
+library(forcats)
+library(tidyr)
+library(dplyr)
+library(tidyverse)
+library(GenomicRanges)
+library(magick)
+library(magrittr)
+library(gridExtra)
+library(IRanges)
+library(Biostrings)
+library(ggrepel)
+library(ggpubr)
+library(viridis)
+library(reshape2)
+library(gprofiler2)
+library(ggsci)
+```
+
+```{r}
+## theme for ggplot
+my_theme = theme_set(theme_bw() +
+          theme(axis.text = element_text(size = 10, colour="black"),
+                axis.title = element_text(size=12, colour="black"),
+                axis.ticks=element_line(color="black"),
+                axis.ticks.length=unit(.15, "cm"),
+                panel.border=element_rect(color="black", fill = NA),
+                panel.background = element_blank(),
+                plot.background = element_blank(),
+                legend.text = element_text(size=10),
+                legend.position = "bottom",
+                aspect.ratio = 1/1)
+)
+```
+
+```{r}
+## load gene annotation
+gnsN = readRDS("~/Documents/Bioinfo_analysis/iCLIP_course/diffRNA_binding/Annotation_preparation/gns.rds")
+
+trl = readRDS("~/Documents/Bioinfo_analysis/iCLIP_course/diffRNA_binding/Annotation_preparation/trl.rds")
+```
+
+
+```{r}
+#| warning: false
+#| message: false
+## Load binding sites
+ic2_bs = import("~/Documents/Bioinfo_analysis/iCLIP_course/iCLIP2_Methods_Stoffel_etal_2023/Rrm4_BS_9nt.bed", format="bed")
+ic2_bs = resize(ic2_bs, fix="center", width = 1) # resize to center
+```
+
+
+```{r}
+#| warning: false
+#| message: false
+
+## import crosslink signals from iCLIP1 (olgeiset et.al 2019)
+my.path.iclip1 = "~/Documents/Bioinfo_analysis/iCLIP_course/iCLIP2_Methods_Stoffel_etal_2023/iCLIP1/bw"
+# plus strand
+plus_bw_i1 = list.files(my.path.iclip1, pattern="Rrm4G_plus", full.names = T)
+plus_bw_i1 = import(plus_bw_i1, as= "Rle")
+# minus strand
+minus_bw_i1 = list.files(my.path.iclip1, pattern="Rrm4G_minus", full.names = T)
+minus_bw_i1 = import(minus_bw_i1, format="bw")
+# make a list
+iCLIP1 = list(plus_ic1 = plus_bw_i1,
+                minus_ic1 = minus_bw_i1) %>% as("GRangesList")
+```
+
+It is important to note that the `Ensembl` gene annotation label chromosomes numerically, whereas the manually curated annotation used in Olgeiser. et al names chromosome as `Um_chrN`, where N represents the chromosome number. To enable comparison between the two iCLIP dataset, I will remove the `Um_chr` prefix from the chromosome name. 
+
+```{r}
+# change the chromosome names
+iCLIP1_bw_mod = lapply(iCLIP1, function(i){
+  # change Um_chr0
+  seqlevels(i) = sub("Um_chr0", "", seqlevels(i))
+  # change Um_chr
+  seqlevels(i) = sub("Um_chr", "", seqlevels(i))
+  
+  # change Um_chr
+  seqlevels(i) = sub("Um_scaf", "um_scaf", seqlevels(i))
+  
+  return(i)
+})
+
+# calculate coverage
+iCLIP1_bw_mod = lapply(iCLIP1_bw_mod, function(i){
+  cov = coverage(i, weight=i$score)
+  return(cov)
+})
+```
+
+```{r}
+#| warning: false
+#| message: false
+
+## Import crosslink signals produced from iCLIP2 
+my.path.iclip2 = "~/Documents/Bioinfo_analysis/iCLIP_course/datasets/imb_koenig_2021_11_stoffel_iCLIP_ustilago_Rrm4/merged/bw"
+# in plus strand
+plus_bw_i2 = list.files(my.path.iclip2, pattern="Rrm4G.v3.duprm.plus.bw", full.names = T)
+plus_bw_i2 = import(plus_bw_i2, as = "Rle")
+
+
+# in minus strand
+minus_bw_i2 = list.files(my.path.iclip2, pattern="Rrm4G.v3.duprm.minus.bw", full.names = T)
+minus_bw_i2 = import(minus_bw_i2, as="Rle")
+```
+
+
+```{r}
+## combine the iCLIP data within a list
+cl_Rle = list(iC1_p = iCLIP1_bw_mod$plus_ic1,
+              iC1_m = iCLIP1_bw_mod$minus_ic1,
+              iC2_p = plus_bw_i2,
+              iC2_m = minus_bw_i2) 
+
+```
+
+```{r}
+#| warning: false
+#| message: false
+## get the window around stop codon
+# get protein coding gene alson
+gnsNP = gnsN[gnsN$gene_biotype=="protein_coding",]
+
+# collect the stop ntd position
+stops= flank(gnsNP, -303,start = FALSE) %>% flank(.,-3) 
+
+# get the last nucleotide of stop codon
+stops = flank(stops,-1, start=FALSE)
+# sanity check 2
+#getSeq(Umaydis,stops)
+
+# make stop window
+stops = stops+30
+
+```
+
+iCLIP signal across the selected window will be normalized using `min-max normalization` as described in Molitor et al. (2022).
+
+```{r}
+
+# normalization of iCLIP signal was carried out as described in Molitor et.al 2022
+min_max_noramlize <- function(x){
+  x_new <- (x-min(x)) / (max(x)-min(x)) 
+  return(x_new)
+}
+```
+
+
+```{r}
+#| warning: false
+#| message: false
+
+## create a metaprofile
+# get the crosslinks within the stop window
+cl_Win =  c(map(cl_Rle[c(1,3)],~.x[stops[strand(stops)=="+"]] %>% as.matrix()),
+            map(cl_Rle[c(2,4)], ~.x[stops[strand(stops)=="-"]] %>% as.matrix()  %>% .[,ncol(.):1]))
+
+cl_win_bin = list(ic1= rbind(cl_Win$iC1_p, cl_Win$iC1_m),
+                  ic2=rbind(cl_Win$iC2_p, cl_Win$iC2_m))
+
+# normalize
+cl_win_norm = lapply(cl_win_bin, function(i) apply(i,1, min_max_noramlize) %>% t(.))
+
+# sum of the signal at each poition for each experiment
+meta_prof_sum = data.frame(ic1= colSums(cl_win_norm$ic1, na.rm=T),
+                           ic2 = colSums(cl_win_norm$ic2, na.rm=T),
+                           pos = -floor(ncol(cl_win_norm[[1]])/2): floor(ncol(cl_win_norm$ic1)/2))
+
+meta_profiles_sum_gg <- meta_prof_sum %>% reshape2::melt(id.vars = "pos") 
+
+pl = ggplot(meta_profiles_sum_gg, aes(x =pos, y = value, color = variable))+
+  geom_line(linewidth=0.5)+
+  geom_point(size=1)+
+  scale_color_manual(values=c("#A0A0A4", "#00AAAA"), labels = c("iCLIP", "iCLIP2"))+
+  labs(x="position relative to stop codon",
+       y="normalized iCLIP signal")+
+  ylim(0,1500)+
+  scale_x_continuous(breaks=seq(-30,30, 10))+
+  theme_bw()+
+  theme(legend.title = element_blank(), legend.position = "top")
+
+pl
+
+## ggsave
+#ggsave("C:/Users/Sri/Documents/Bioinfo_analysis/iCLIP_course/iCLIP2_Methods_Stoffel_etal_2023/metaprofile.pdf", pl,  width = 10, height = 10, units ="cm")
+```
+
+Notably, this analysis revealed that iCLIP2 captures Rrm4 crosslinking sites around the stop codon with substantially higher efficiency than the previous iCLIP protocol, suggesting that microbial iCLIP2 improves the mapping of RNA–protein interactions.
+
+
+```{r}
+sessionInfo()
+```
+

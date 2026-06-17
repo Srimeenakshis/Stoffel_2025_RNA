@@ -1,0 +1,310 @@
+---
+title: "Transcriptome-wide binding of Rrm4 indentified through iCLIP2"
+date: last-modified
+author: 
+    - name:  "Srimeenakshi Sankaranarayanan"
+      
+title-block-banner: true
+format: 
+    html:
+        theme: flatly
+        self-contained: true
+        code-fold: true
+        code-summary: "Show the code"
+        toc: true
+        number-sections: true
+        anchor-sections: true
+    pdf:
+        toc: true
+        number-sections: true
+        self-contained: true
+editor: source
+execute:
+  echo: true
+  error: false
+  warning: false
+  message: false
+---
+
+This report focuses on the identification of transcriptome-wide binding sites of full-length Rrm4. The main aim of this study is to evaluate the efficiency of the iCLIP2 protocol in resolving RNA–protein interactions, in comparison with the previously established iCLIP protocol.
+
+To this end, iCLIP2 analysis was performed using full-length Rrm4 using five biological replicates. The resulting RNA-sequencing reads were pre-processed by Anke Busch at IMB, Mainz. Crosslink sites were then identified from the mapped reads using pureCLIP.
+
+In this report, the BindingSiteFinder package is used to identify Rrm4 binding sites across the transcriptome.
+
+```{r}
+## libraries
+library(BSgenome.Umaydis.ENSMBL.UM1) # forged tomato genome
+library(ggplot2)
+library(BindingSiteFinder)
+library(rtracklayer)
+library(ComplexHeatmap)
+library(GenomicFeatures)
+library(forcats)
+library(tidyr)
+library(dplyr)
+library(tidyverse)
+library(GenomicRanges)
+library(magick)
+library(magrittr)
+library(gridExtra)
+library(IRanges)
+library(Biostrings)
+#library(ggpmisc)
+library(ggrepel)
+library(ggpubr)
+library(viridis)
+library(reshape2)
+library(gprofiler2)
+library(ggsci)
+library(GGally)
+library(ggplotify)
+library(GetoptLong)
+library(tidyHeatmap)
+```
+
+```{r}
+## theme for ggplot
+my_theme = theme_set(theme_bw() +
+          theme(axis.text = element_text(size = 10, colour="black"),
+                axis.title = element_text(size=12, colour="black"),
+                axis.ticks=element_line(color="black"),
+                axis.ticks.length=unit(.15, "cm"),
+                panel.border=element_rect(color="black", fill = NA),
+                panel.background = element_blank(),
+                plot.background = element_blank(),
+                legend.text = element_text(size=10),
+                legend.position = "bottom",
+                aspect.ratio = 1/1)
+)
+```
+
+```{r}
+## load gene annotation
+gnsN = readRDS("~/Documents/Bioinfo_analysis/iCLIP_course/diffRNA_binding/Annotation_preparation/gns.rds")
+
+trl = readRDS("~/Documents/Bioinfo_analysis/iCLIP_course/diffRNA_binding/Annotation_preparation/trl.rds")
+```
+
+```{r}
+## color to use
+# Transcript region
+u3 = "#D41D1F"
+cd= "#FF9D9A"
+u5 = "#E15759"
+In  = "#D3D3D3"
+```
+
+## Prepare binding sites
+
+```{r}
+## import the pureCLIP data
+
+# folder where the pureCLIP output and bw files are found
+my.path.rrm4 = "~/Documents/Bioinfo_analysis/iCLIP_course/datasets/imb_koenig_2021_11_stoffel_iCLIP_ustilago_Rrm4/PUREclip_peaks"
+# pureClip path
+peaksInitial = paste0(my.path.rrm4,"/sites.imb_koenig_2021_11_Rrm4G.v3.duprm.bam.bed")
+
+#import the crosslink sites identified by pureCLIP
+peaksInitial= import(con = peaksInitial, 
+                     format = "BED", 
+                     extraCols=c("additionalScores" = "character"))
+peaksInitial = keepStandardChromosomes(peaksInitial, pruning.mode = "coarse")
+```
+
+```{r}
+#| warning: false
+#| message: false
+## import the bw files
+# bw files from the "+" strand
+plus_bw = list.files(my.path.rrm4, 
+                     pattern= "plus.bw$", 
+                     full.names = T) 
+
+# bw files from the "-" strand
+minus_bw=list.files(my.path.rrm4, 
+                    pattern= "minus.bw$", 
+                    full.names = T) 
+
+# define metadata table
+meta.file.rrm4= data.frame(
+  name = "Rrm4G",
+  id=paste0("rep", 1:5),
+  condition= factor(rep("rrm4G", 5)),
+  clPlus= plus_bw,
+  clMinus=minus_bw
+)
+
+# Make BindingSiteFinder object
+bdsWT.initial = BSFDataSetFromBigWig(ranges = peaksInitial, 
+                                     meta = meta.file.rrm4)
+```
+
+## Define binding sites
+
+As identified in Olgeiser et.al (2019), the Rrm4 binding site width will be set to 9-nt. This allows direct comparison of the efficiency of two different iCLIP protocol in resolving Rrm4-RNA interaction.
+
+```{r}
+#| warning: false
+#| message: false
+## resolve overlapping bs
+
+# resolve overlapping transcript biotypes using hierarchy
+rule.gene = c("tRNA", "protein_coding", "rRNA", "snRNA", "snoRNA") 
+
+# binding site definition
+bdsWT.merge = BSFind(bdsWT.initial,
+                     anno.genes = gnsN, 
+                     anno.transcriptRegionList = trl,
+                     bsSize = 9, 
+                     cutoff.geneWiseFilter = 0.1, 
+                     cutoff.globalFilter = 0.05,
+                     merge.minWidth = 2, 
+                     merge.minClSites = 2, 
+                     merge.minCrosslinks = 2,
+                     repro.cutoff=0.05,
+                     repro.nReps = 4,
+                     overlaps.geneAssignment = "hierarchy",
+                     overlaps.rule.geneAssignment = rule.gene,
+                     match.geneType = "gene_biotype",
+                     match.geneName = "gene_id")
+```
+
+First, I want to determine whether defining binding sites after filtering out poor crosslinking events and accounting for reproducibility improves the overall consistency between replicates.
+
+::: panel-tabset
+### before reproducibility filter
+
+```{r}
+#| warning: false
+#| message: false
+reproducibilityScatterPlot(bdsWT.initial, quiet = FALSE)
+```
+
+### after reproducibility filter
+
+```{r}
+#| warning: false
+#| message: false
+reproducibilityScatterPlot(bdsWT.merge, quiet = FALSE)
+```
+:::
+
+Next, I want to check the reproducibility of identified binding sites across the five replicates.
+
+```{r}
+## check binding site reproducibility
+reproducibilitySamplesPlot(bdsWT.merge)
+
+```
+
+This analysis revealed that the identified binding sites were highly reproducible, with majority of them overlapping with at least 4 out of 5 replicates.
+
+## Analysing binding sites of full-length Rrm4
+
+Next, I will assess whether Rrm4 binding sites are enriched in specific transcript region.
+
+::: panel-tabset
+### Rrm4 binding site strength vs transcript region
+
+```{r}
+# get GRanges
+bdsWT.gr= getRanges(bdsWT.merge)
+
+bdsWT.df = bdsWT.gr %>% 
+  data.frame(.) %>% 
+  .[,c(12:14)] %>% 
+  filter(.,!transcriptRegion=="OTHER")
+
+# 20.1833 median of all the scores
+ggplot(bdsWT.df, aes(x= factor(transcriptRegion, 
+                                         levels = c("UTR5", "CDS", "INTRON", "UTR3")), 
+                               y=log10(score), 
+                               fill=transcriptRegion))+
+          geom_hline(yintercept = log10(20.1833))+
+          geom_boxplot(outlier.shape = NA)+
+          labs(title = " Rrm4 binding sites",
+               x= "",
+               y= "Binding site strength \n [log10(pureCLIP score)]")+
+          scale_fill_manual(values = c("CDS"=cd, "INTRON"=In, "UTR3"=u3, "UTR5"=u5))+
+          theme(legend.position = "None")+
+          theme_light()
+
+```
+
+### fraction of binding sites in transcript region
+
+```{r}
+## get the binding site count across transcript region across all genes
+bdsWT.df = bdsWT.gr %>%
+  data.frame(.) %>%  
+  .[,c(12)] %>% table(.)  %>% 
+  as.data.frame.array(.) %>% 
+  rownames_to_column(.) %>% 
+  set_colnames(.,c("set", "value")) %>% 
+  .[-3,]
+
+# ggplot
+Bstr_all.pl = ggplot(bdsWT.df, aes(x=set, y=value, fill=set))+
+          geom_bar(stat="identity",  color="black")+
+          labs(title = " Rrm4 binding sites",
+               x= "transcript region",
+               y= "number of binding sites")+
+          scale_fill_manual(values = c("CDS"=cd, "INTRON"=In, "UTR3"=u3, "UTR5"=u5))+
+          theme(legend.position = "None")+
+          theme_bw()
+
+
+## get the binding site frequency across each transcript region within each gene
+bdsWT.df = bdsWT.gr %>% 
+  data.frame(.) %>% 
+  .[,c(9,12)] %>% 
+  .[!(is.na(.$geneID)),] %>% 
+  table(.)  %>% 
+  as.data.frame.array(.) %>% 
+  rownames_to_column(., "gene_id") %>%.[,-4]
+
+
+# Normalize the binding site count across transcript region with its width for each gene
+
+bdsWT.df$CDS_length = lookup::lookup(bdsWT.df$gene_id, gnsN$gene_id, width(gnsN)) #CDS 
+bdsWT.df$UTR3_length = 300 #UTR3
+bdsWT.df$UTR5_length = 300  #UTR5
+bdsWT.df$int_length = median(width(trl$intron)) #Intron
+
+# caluclation of the fraction
+bdsWT.df$freq_CDS = bdsWT.df$CDS/bdsWT.df$CDS_length
+bdsWT.df$freq_intron = bdsWT.df$INTRON/bdsWT.df$int_length
+bdsWT.df$freq_UTR3 = bdsWT.df$UTR3/bdsWT.df$UTR3_length
+bdsWT.df$freq_UTR5= bdsWT.df$UTR5/bdsWT.df$UTR5_length
+
+bdsWT.df = bdsWT.df[,c(10:13)]
+
+bdsWT.df = colSums(bdsWT.df) %>% 
+  as.data.frame(.) %>%  
+  rownames_to_column(.) %>% 
+  set_colnames(.,c("set", "value"))
+
+Bstr_freq.pl = ggplot(bdsWT.df, aes(x=set, y=value, fill=set))+
+          geom_bar(stat="identity", color="black")+
+          labs(title = " Rrm4 binding site frequency",
+               x= "transcript region",
+               y= "frequency of binding sites")+
+         scale_fill_manual(values = c("freq_CDS"=cd, "freq_intron"=In, "freq_UTR3"=u3, "freq_UTR5"=u5))+
+          theme(legend.position = "None")+
+          theme_bw()
+
+
+ggarrange(Bstr_all.pl, Bstr_freq.pl, ncol=2, common.legend = TRUE)
+
+
+```
+:::
+
+Overall, a greater number of Rrm4 binding sites were identified within the CDS region. However, frequency analysis revealed that binding sites occurred more frequently in the 3′ UTR than in the CDS.
+
+## Session info
+
+```{r}
+sessionInfo()
+```
